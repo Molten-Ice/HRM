@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Simple Eval Visualization</title>
+<style>
+  :root {
+    --cell-size: 36px;
+    --gap: 4px;
+    --font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif;
+  }
+  body { font: var(--font); margin: 16px; color: #111; background: #fafafa; }
+  h2 { margin: 16px 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .panel { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .controls textarea { width: 560px; height: 140px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+  .controls input[type="number"] { width: 72px; }
+  .grid-wrap { display: grid; grid-template-columns: auto auto; gap: 24px; }
+  .grid { display: grid; gap: var(--gap); }
+  .grid-title { text-align: center; margin-bottom: 8px; font-weight: 600; }
+  .cells { display: grid; gap: var(--gap); }
+  .cell { width: var(--cell-size); height: var(--cell-size); display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid #ddd; background: #fff; font-weight: 600; position: relative; }
+  .cell.mismatch { outline: 2px solid rgba(220, 38, 38, 0.8); }
+  .cell .badge { position: absolute; right: 4px; bottom: 2px; font-size: 10px; opacity: 0.7; }
+  .legend { display: flex; gap: 12px; align-items: center; margin-top: 8px; font-size: 12px; color: #555; }
+  .swatch { width: 20px; height: 12px; border-radius: 3px; border: 1px solid #ddd; }
+  .detail { min-width: 280px; max-width: 360px; }
+  .detail pre { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .footer { margin-top: 16px; font-size: 12px; color: #666; }
+  .divider { height: 1px; background: #eee; margin: 12px 0; }
+  button { cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="panel controls">
+    <div>
+      <div><strong>Load JSON:</strong></div>
+      <input id="fileInput" type="file" accept="application/json" />
+    </div>
+    <div>
+      <div><strong>Or paste JSON:</strong></div>
+      <textarea id="jsonInput" placeholder='{ "pred": [[...]], "target": [[...]], "logits": [[[...]]] }'></textarea>
+      <div style="margin-top: 6px; display: flex; gap: 8px;">
+        <button id="loadBtn">Load</button>
+        <button id="exampleBtn">Load Example Snippet</button>
+      </div>
+    </div>
+    <div>
+      <div><strong>Top-K to show:</strong></div>
+      <input id="topK" type="number" min="1" max="20" value="5" />
+    </div>
+    <div>
+      <div><strong>Cell size (px):</strong></div>
+      <input id="cellSize" type="number" min="20" max="80" value="36" />
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="row">
+    <div class="panel">
+      <div class="grid-title">Prediction vs Target</div>
+      <div class="legend">
+        <span>Uncertainty</span>
+        <span class="swatch" style="background: rgba(220, 38, 38, 0.15)"></span>
+        <span>High</span>
+        <span class="swatch" style="background: rgba(34, 197, 94, 0.12)"></span>
+        <span>Low</span>
+        <span>|</span>
+        <span class="swatch" style="background: #fff; outline: 2px solid rgba(220, 38, 38, 0.8)"></span>
+        <span>Mismatch</span>
+      </div>
+      <div id="grids" class="grid-wrap"></div>
+    </div>
+
+    <div class="panel detail">
+      <div class="grid-title">Cell Details</div>
+      <div id="cellMeta">Hover a cell to inspect logits.</div>
+      <pre id="cellLogits"></pre>
+    </div>
+  </div>
+
+  <div class="footer">This is a static file. For local files, use the file chooser above. No data leaves your browser.</div>
+
+<script>
+(function() {
+  const $ = (sel) => document.querySelector(sel);
+  const fileInput = $('#fileInput');
+  const jsonInput = $('#jsonInput');
+  const loadBtn = $('#loadBtn');
+  const exampleBtn = $('#exampleBtn');
+  const topKInput = $('#topK');
+  const cellSizeInput = $('#cellSize');
+  const gridsEl = $('#grids');
+  const cellMetaEl = $('#cellMeta');
+  const cellLogitsEl = $('#cellLogits');
+
+  function setCellSize(px) {
+    document.documentElement.style.setProperty('--cell-size', px + 'px');
+  }
+
+  function softmax(arr) {
+    const m = Math.max(...arr);
+    const exps = arr.map(v => Math.exp(v - m));
+    const s = exps.reduce((a, b) => a + b, 0);
+    return exps.map(v => v / (s || 1));
+  }
+
+  function topKProbs(probs, k) {
+    const idx = probs.map((p, i) => [p, i]).sort((a, b) => b[0] - a[0]).slice(0, k);
+    return idx.map(([p, i]) => ({ index: i, prob: p }));
+  }
+
+  function marginUncertainty(probs) {
+    // 1 - (p_top1 - p_top2), in [0,1]; higher = more uncertain
+    const sorted = [...probs].sort((a,b) => b - a);
+    const top1 = sorted[0] || 0;
+    const top2 = sorted[1] || 0;
+    const margin = Math.max(0, top1 - top2);
+    return 1 - Math.min(1, margin);
+  }
+
+  function colorForUncertainty(u) {
+    // Map u in [0,1] to red(alpha) to green(alpha). High u = red-ish, low u = green-ish
+    const redAlpha = 0.15 * u;   // up to 0.15
+    const greenAlpha = 0.12 * (1 - u); // up to 0.12
+    // Blend: bias to red for higher uncertainty; otherwise soft green
+    if (u > 0.5) return `rgba(220, 38, 38, ${redAlpha.toFixed(3)})`; // red-500
+    return `rgba(34, 197, 94, ${greenAlpha.toFixed(3)})`; // green-500
+  }
+
+  function renderGrid(title, values, refValues, logits, onHover) {
+    const rows = values.length;
+    const cols = values[0].length;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'grid';
+
+    const h = document.createElement('div');
+    h.className = 'grid-title';
+    h.textContent = title;
+
+    const cells = document.createElement('div');
+    cells.className = 'cells';
+    cells.style.gridTemplateColumns = `repeat(${cols}, var(--cell-size))`;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const v = values[r][c];
+        const ref = refValues ? refValues[r][c] : undefined;
+        const lg = logits ? logits[r][c] : undefined;
+        const probs = Array.isArray(lg) ? softmax(lg) : null;
+        const unc = probs ? marginUncertainty(probs) : 0;
+
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        cell.textContent = v;
+        cell.style.background = probs ? colorForUncertainty(unc) : '#fff';
+        if (ref !== undefined && v !== ref) cell.classList.add('mismatch');
+
+        const badge = document.createElement('div');
+        badge.className = 'badge';
+        if (probs) {
+          const sorted = [...probs].sort((a,b) => b - a);
+          const top1 = sorted[0] || 0;
+          badge.textContent = (top1 * 100).toFixed(0) + '%';
+        } else {
+          badge.textContent = '';
+        }
+        cell.appendChild(badge);
+
+        cell.onmouseenter = () => onHover({ r, c, value: v, target: ref, logits: lg, probs });
+        cells.appendChild(cell);
+      }
+    }
+
+    wrap.appendChild(h);
+    wrap.appendChild(cells);
+    return wrap;
+  }
+
+  function render(data) {
+    try {
+      const pred = data.pred;
+      const target = data.target;
+      const logits = data.logits; // shape [rows][cols][vocab]
+
+      if (!Array.isArray(pred) || !Array.isArray(target)) throw new Error('pred/target must be 2D arrays');
+      if (pred.length === 0 || pred[0].length === 0) throw new Error('Empty grid');
+
+      gridsEl.innerHTML = '';
+      const onHover = ({ r, c, value, target, logits, probs }) => {
+        cellMetaEl.textContent = `Cell [${r + 1}, ${c + 1}] — pred: ${value}, target: ${target}`;
+        if (!logits || !probs) {
+          cellLogitsEl.textContent = '(no logits)';
+          return;
+        }
+
+        const k = Math.max(1, Math.min(20, parseInt(topKInput.value || '5', 10)));
+        const topK = topKProbs(probs, k)
+          .map(({ index, prob }) => `${index}: ${(prob * 100).toFixed(2)}%`) 
+          .join('\n');
+
+        const predIdx = value;
+        const predProb = probs[predIdx] != null ? (probs[predIdx] * 100).toFixed(2) + '%' : 'n/a';
+
+        cellLogitsEl.textContent = [
+          `Top-${k} probabilities:`,
+          topK,
+          '',
+          `Pred index: ${predIdx}  (p=${predProb})`,
+          `Vocab size: ${logits.length}`,
+        ].join('\n');
+      };
+
+      const sideRows = pred.length;
+      const sideCols = pred[0].length;
+
+      const predGrid = renderGrid('Pred', pred, target, logits, onHover);
+      const targetGrid = renderGrid('Target', target, target, null, onHover);
+
+      gridsEl.appendChild(predGrid);
+      gridsEl.appendChild(targetGrid);
+
+      // Initialize hover on first cell
+      const firstLogits = logits && logits[0] && logits[0][0];
+      const firstProbs = Array.isArray(firstLogits) ? softmax(firstLogits) : null;
+      cellMetaEl.textContent = `Cell [1, 1] — pred: ${pred[0][0]}, target: ${target[0][0]}`;
+      if (firstLogits && firstProbs) {
+        const k = Math.max(1, Math.min(20, parseInt(topKInput.value || '5', 10)));
+        const topK = topKProbs(firstProbs, k)
+          .map(({ index, prob }) => `${index}: ${(prob * 100).toFixed(2)}%`) 
+          .join('\n');
+        const predIdx = pred[0][0];
+        const predProb = (firstProbs[predIdx] * 100).toFixed(2) + '%';
+        cellLogitsEl.textContent = [
+          `Top-${k} probabilities:`,
+          topK,
+          '',
+          `Pred index: ${predIdx}  (p=${predProb})`,
+          `Vocab size: ${firstLogits.length}`,
+        ].join('\n');
+      } else {
+        cellLogitsEl.textContent = '(no logits)';
+      }
+    } catch (e) {
+      alert('Render error: ' + e.message);
+    }
+  }
+
+  function parseAndRender(text) {
+    try {
+      const data = JSON.parse(text);
+      render(data);
+    } catch (e) {
+      alert('Invalid JSON: ' + e.message);
+    }
+  }
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    jsonInput.value = text;
+    parseAndRender(text);
+  });
+
+  loadBtn.addEventListener('click', () => {
+    parseAndRender(jsonInput.value);
+  });
+
+  exampleBtn.addEventListener('click', () => {
+    const example = {
+      pred: [[0]],
+      target: [[0]],
+      logits: [[[0, 0.1, -0.2]]]
+    };
+    jsonInput.value = JSON.stringify(example);
+    render(example);
+  });
+
+  topKInput.addEventListener('change', () => {
+    if (!jsonInput.value) return;
+    try { render(JSON.parse(jsonInput.value)); } catch {}
+  });
+
+  cellSizeInput.addEventListener('change', () => {
+    const v = parseInt(cellSizeInput.value || '36', 10);
+    setCellSize(Math.max(20, Math.min(80, v)));
+  });
+
+  setCellSize(parseInt(cellSizeInput.value || '36', 10));
+})();
+</script>
+</body>
+</html>
