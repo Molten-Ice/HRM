@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Improved HRM Sudoku Output Visualizer</title>
+    <style>
+        #grid {
+            display: grid;
+            grid-template-columns: repeat(9, 50px);
+            grid-gap: 1px;
+            margin: 20px auto;
+            width: fit-content;
+        }
+        .cell {
+            position: relative;
+            width: 50px;
+            height: 50px;
+            border: 1px solid black;
+            text-align: center;
+            line-height: 50px;
+            font-size: 20px;
+            background: white;
+        }
+        .cell .prob {
+            position: absolute;
+            bottom: 2px;
+            left: 2px;
+            font-size: 9px;
+            color: black;
+        }
+        .cell .corr {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: calc(100% / 4);
+            height: calc(100% / 4);
+            background: #ffefef;
+            font-size: 12px;
+            border: 1px solid #d00;
+            display: none;
+            place-items: center;
+            text-align: center;
+            line-height: 1;
+            box-sizing: border-box;
+        }
+        /* Thicker borders for 3x3 blocks */
+        .cell.border-top { border-top: 3px solid black; }
+        .cell.border-left { border-left: 3px solid black; }
+        .cell.border-right { border-right: 3px solid black; }
+        .cell.border-bottom { border-bottom: 3px solid black; }
+    </style>
+</head>
+<body>
+    <h1>Improved HRM Sudoku Output Visualizer</h1>
+    <div style="margin: 8px 0;">
+        Example:
+        <select id="exampleSelect" style="min-width: 200px;"></select>
+    </div>
+    <div id="grid"></div>
+    <div>Step: <span id="step">0</span></div>
+    <input type="range" id="slider" list="steps" min="0" max="2" value="0" step="1" style="width: 300px;">
+    <datalist id="steps">
+        <option value="0" label="Input"></option>
+        <option value="1" label="Pred"></option>
+        <option value="2" label="Target"></option>
+    </datalist>
+    <div>Accuracy: <span id="accuracy">—</span></div>
+
+    <script>
+        let dataset = [];
+        let data = null;
+        let totalSteps = 0; // 0-based inclusive
+
+        function initGrid() {
+            const grid = document.getElementById('grid');
+            for (let r = 0; r < 9; r++) {
+                for (let c = 0; c < 9; c++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.id = `cell-${r}-${c}`;
+                    if (r % 3 === 0) cell.classList.add('border-top');
+                    if (r === 8) cell.classList.add('border-bottom');
+                    if (c % 3 === 0) cell.classList.add('border-left');
+                    if (c === 8) cell.classList.add('border-right');
+
+                    const main = document.createElement('span');
+                    main.id = `main-${r}-${c}`;
+                    cell.appendChild(main);
+
+                    const prob = document.createElement('span');
+                    prob.className = 'prob';
+                    prob.id = `prob-${r}-${c}`;
+                    cell.appendChild(prob);
+
+                    const corr = document.createElement('div');
+                    corr.className = 'corr';
+                    corr.id = `corr-${r}-${c}`;
+                    cell.appendChild(corr);
+
+                    grid.appendChild(cell);
+                }
+            }
+        }
+
+        function updateGrid(step) {
+            const stepInt = parseInt(step, 10);
+            const numIntermediate = (data.step_preds || []).length;
+            let stepLabel = 'Input';
+            if (stepInt === 0) stepLabel = 'Input';
+            else if (stepInt >= 1 && stepInt <= numIntermediate) stepLabel = `Step ${stepInt}`;
+            else if (stepInt === numIntermediate + 1) stepLabel = 'Prediction';
+            else stepLabel = 'Target';
+            document.getElementById('step').innerText = `${stepInt} (${stepLabel})`;
+            document.getElementById('accuracy').innerText = (data.accuracy * 100).toFixed(0) + '%';
+            for (let i = 0; i < 81; i++) {
+                const r = Math.floor(i / 9);
+                const c = i % 9;
+                const main = document.getElementById(`main-${r}-${c}`);
+                const probElem = document.getElementById(`prob-${r}-${c}`);
+                const corr = document.getElementById(`corr-${r}-${c}`);
+                const cell = document.getElementById(`cell-${r}-${c}`);
+
+                let rawValue;
+                let probVector = null;
+                const isInput = stepInt === 0;
+                const isIntermediate = stepInt >= 1 && stepInt <= numIntermediate;
+                const isFinalPred = stepInt === numIntermediate + 1;
+                const isTarget = stepInt === numIntermediate + 2;
+                if (isInput) {
+                    rawValue = data.input ? data.input[i] : 1;
+                } else if (isIntermediate) {
+                    rawValue = data.step_preds[stepInt - 1][i];
+                    probVector = (data.step_logits && data.step_logits[stepInt - 1]) ? data.step_logits[stepInt - 1][i] : null;
+                } else if (isFinalPred) {
+                    rawValue = data.preds[i];
+                    probVector = data.logits ? data.logits[i] : null;
+                } else {
+                    rawValue = data.target[i];
+                    // For target, visualize probability under final distribution if available
+                    probVector = data.logits ? data.logits[i] : null;
+                }
+
+                const displayValue = (rawValue === 1) ? '' : rawValue - 1;
+                main.innerText = displayValue;
+
+                probElem.style.display = 'none';
+                corr.style.display = 'none';
+                cell.style.background = 'white';
+
+                if (!isInput && probVector) {
+                    const getProbFromVector = (vec, value) => {
+                        if (!vec) return 0;
+                        const a = (value in vec) ? vec[value] : undefined;
+                        const b = (value - 1 in vec) ? vec[value - 1] : undefined;
+                        if (typeof a === 'number' && typeof b === 'number') return Math.max(a, b);
+                        if (typeof a === 'number') return a;
+                        if (typeof b === 'number') return b;
+                        return 0;
+                    };
+                    const prob = getProbFromVector(probVector, rawValue);
+                    const hue = Math.max(0, Math.min(120, prob * 120)); // 0=red, 120=green
+                    cell.style.background = `hsl(${hue}, 70%, 75%)`;
+                    probElem.innerText = prob.toFixed(2);
+                    probElem.style.display = 'block';
+
+                    if (!isTarget) {
+                        const isIncorrect = rawValue !== data.target[i];
+                        if (isIncorrect) {
+                            corr.innerText = data.target[i] - 1;
+                            corr.style.display = 'grid';
+                        }
+                    }
+                }
+            }
+        }
+
+        function rebuildSlider() {
+            const slider = document.getElementById('slider');
+            const dataList = document.getElementById('steps');
+            const numIntermediate = (data.step_preds || []).length;
+            totalSteps = 1 + numIntermediate + 1 + 1; // input + intermediates + pred + target
+            slider.min = 0;
+            slider.max = totalSteps - 1;
+            slider.value = 0;
+            slider.step = 1;
+            dataList.innerHTML = '';
+            const addOpt = (value, label) => {
+                const opt = document.createElement('option');
+                opt.value = String(value);
+                opt.label = label;
+                dataList.appendChild(opt);
+            };
+            addOpt(0, 'Input');
+            for (let s = 1; s <= numIntermediate; s++) addOpt(s, `Step ${s}`);
+            addOpt(numIntermediate + 1, 'Pred');
+            addOpt(numIntermediate + 2, 'Target');
+        }
+
+        function toDisplay(rawValue) {
+            return (rawValue === 1) ? '' : (rawValue - 1);
+        }
+
+        // Load data dynamically from outputs.json
+        fetch('outputs.json')
+            .then(r => r.json())
+            .then(arr => {
+                dataset = Array.isArray(arr) ? arr : [arr];
+                const sel = document.getElementById('exampleSelect');
+                sel.innerHTML = '';
+                dataset.forEach((item, idx) => {
+                    const opt = document.createElement('option');
+                    const pid = (item.puzzle_id != null) ? `puzzle ${item.puzzle_id}` : `example ${idx+1}`;
+                    opt.value = String(idx);
+                    opt.textContent = `${idx+1}: ${pid}`;
+                    sel.appendChild(opt);
+                });
+                sel.addEventListener('change', () => {
+                    data = dataset[parseInt(sel.value, 10)];
+                    rebuildSlider();
+                    updateGrid(0);
+                });
+
+                data = dataset[0];
+                initGrid();
+                rebuildSlider();
+                updateGrid(0);
+                document.getElementById('slider').addEventListener('input', (e) => updateGrid(e.target.value));
+            })
+            .catch(err => {
+                console.error('Failed to load outputs.json', err);
+                // Fallback to empty grid
+                initGrid();
+            });
+    </script>
+</body>
+</html>

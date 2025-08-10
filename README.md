@@ -1,5 +1,7 @@
 # Hierarchical Reasoning Model
 
+https://github.com/sapientinc/HRM
+
 ![](./assets/hrm.png)
 
 Reasoning, the process of devising and executing complex goal-oriented action sequences, remains a critical challenge in AI.
